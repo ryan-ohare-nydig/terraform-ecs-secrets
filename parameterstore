@@ -1,0 +1,63 @@
+// declare an SSM parameter (storage of the secure password)
+// set the type, and other metadata about it in the storage
+// area. The value will be the random value declared as an output
+// to the module and input into this as the value.
+resource "aws_ssm_parameter" "database_password_parameter" {
+  name        = "/production/database/password/master"
+  description = "Production environment database password"
+  type        = "SecureString"
+  value       = random_password.database_password.result
+}
+
+
+// create an IAM policy which will allow the ecs task execution role to
+// access the password parameter store (where the secret actually is stored)
+// This policy attaches to the execution role to so it can access the paremeter
+// store to access the SSM secrets
+resource "aws_iam_role_policy" "password_policy_parameterstore" {
+  name = "password-policy-parameterstore"
+  role = aws_iam_role.ecs_task_execution_role.id
+
+  policy = <<-EOF
+  {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Action": [
+          "ssm:GetParameters"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "${aws_ssm_parameter.database_password_parameter.arn}"
+        ]
+      }
+    ]
+  }
+  EOF
+}
+
+// template file for creating populating json with the task defintion.
+// this will place inside the template the secrets which will be passed
+// into the container via an environment variable, which will be pulled
+// out of SSM via the referenced ARN
+data "template_file" "task_template_parameterstore" {
+  template = "${file("./templates/task.json.tpl")}"
+
+  vars = {
+    app_cpu           = var.cpu
+    app_memory        = var.memory
+    database_password = aws_ssm_parameter.database_password_parameter.arn
+  }
+}
+
+
+//
+resource "aws_ecs_task_definition" "task_definition_parameterstore" {
+  family                   = "task-parameterstore"
+  execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
+  requires_compatibilities = ["EC2"]
+  cpu                      = var.cpu
+  memory                   = var.memory
+  network_mode             = "awsvpc"
+  container_definitions    = data.template_file.task_template_parameterstore.rendered
+}
